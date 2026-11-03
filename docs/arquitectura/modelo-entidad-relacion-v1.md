@@ -26,89 +26,14 @@ Se adopta un **monolito modular Laravel + PostgreSQL** para una sola institució
 
 ## 2. Diagrama ER — esquema lógico propuesto
 
-```mermaid
-erDiagram
-    USERS o|--o| DOCTORS : "cuenta opcional"
-    USERS o|--o{ APPOINTMENTS : "registra"
-    USERS ||--o{ CONSULTATION_AMENDMENTS : "autor"
-    PATIENTS ||--o| CLINICAL_RECORDS : "expediente"
-    PATIENTS ||--o{ APPOINTMENTS : "agenda"
-    DOCTORS ||--o{ APPOINTMENTS : "atiende"
-    PATIENTS ||--o{ MEDICAL_CONSULTATIONS : "recibe"
-    DOCTORS ||--o{ MEDICAL_CONSULTATIONS : "realiza"
-    APPOINTMENTS o|--o| MEDICAL_CONSULTATIONS : "puede originar"
-    MEDICAL_CONSULTATIONS ||--o{ CONSULTATION_AMENDMENTS : "corrige con addenda"
+![Modelo entidad–relación conceptual SIGCM en notación de Peter Chen](./diagramas/sigcm-chen-conceptual-v1.svg)
 
-    USERS {
-      bigint id PK
-      varchar name
-      varchar email UK
-      varchar password_hash
-      boolean is_active
-    }
-    DOCTORS {
-      bigint id PK
-      bigint user_id FK,UK "nullable"
-      varchar first_names
-      varchar last_names
-      varchar professional_license UK
-      varchar specialty "informativo v1"
-      boolean is_active
-    }
-    PATIENTS {
-      bigint id PK
-      varchar document_type "nullable"
-      varchar document_number "nullable"
-      varchar first_names
-      varchar last_names
-      date birth_date "nullable"
-      varchar phone "nullable"
-      varchar email "nullable"
-    }
-    CLINICAL_RECORDS {
-      bigint id PK
-      bigint patient_id FK,UK
-      text medical_history "nullable"
-      text surgical_history "nullable"
-      text family_history "nullable"
-      text allergies "nullable"
-      text current_medications "nullable"
-      timestamptz opened_at
-    }
-    APPOINTMENTS {
-      bigint id PK
-      bigint patient_id FK
-      bigint doctor_id FK
-      bigint created_by_user_id FK "nullable"
-      timestamptz starts_at
-      timestamptz ends_at
-      varchar status
-      text reason "nullable"
-      text cancellation_reason "nullable"
-    }
-    MEDICAL_CONSULTATIONS {
-      bigint id PK
-      bigint patient_id FK
-      bigint doctor_id FK
-      bigint appointment_id FK,UK "nullable"
-      timestamptz occurred_at
-      text reason_for_visit
-      text subjective "nullable"
-      text objective "nullable"
-      text assessment "nullable"
-      text plan "nullable"
-      varchar status
-      timestamptz signed_at "nullable"
-    }
-    CONSULTATION_AMENDMENTS {
-      bigint id PK
-      bigint medical_consultation_id FK
-      bigint author_user_id FK
-      text reason
-      text additional_note
-      timestamptz created_at
-    }
-```
+**Notación:** entidades en rectángulos; relaciones en rombos; atributos en óvalos; identificadores subrayados. Las etiquetas `(mínimo,máximo)` muestran la participación de cada entidad en la relación. La relación **REÚNE** figura con líneas discontinuas porque la colección de consultas de la historia se **deriva de `patient_id`**, sin introducir una FK adicional en `medical_consultations`.
+
+- [Abrir el diagrama vectorial SVG](./diagramas/sigcm-chen-conceptual-v1.svg).
+- **Modelo conceptual vs. físico:** el diagrama representa los cinco dominios del README. Las entidades técnicas `users` y `consultation_amendments` se mantienen en el diccionario lógico de este documento, sin mezclarse con el alcance conceptual de negocio.
+- **Participación:** `PACIENTE (1,1) — POSEE — (1,1) HISTORIA CLÍNICA` asume el alta transaccional de ambos registros indicada por RI-01. Antes del alta, no existe ninguno de los dos.
+
 
 `PK` = primary key; `FK` = foreign key; `UK` = clave única. Las columnas `created_at` y `updated_at` convencionales se omiten del diagrama para mejorar su lectura. En `patients`, la unicidad es **compuesta** entre `document_type` y `document_number` cuando ambos se conocen, no individual por campo.
 
