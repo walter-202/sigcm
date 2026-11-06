@@ -206,6 +206,260 @@ Esta matriz es **propuesta de permisos**, no roles ya implementados. Distinguir 
 | Consulta — enmienda | 1 — 0..N | Correcciones posteriores a firma sin sobrescribir originales. |
 | Usuario — médico | 0..1 — 0..1 | `doctors.user_id` es opcional y único: identidad profesional distinta de credencial de acceso. |
 
+### 2.5. Modelo lógico tabular — esquema relacional completo
+
+**Estado:** propuesta de esquema normalizado (no implementado). Se detalla la traducción de las entidades y las asociaciones a **12 tablas**: siete tablas de SIGCM/Laravel (seis de operación y `users`) y cinco tablas administradas por Spatie. Filament Shield utiliza ese RBAC, **sin crear tablas propias de roles o permisos**.
+
+| Grupo | Tablas | Propietario del esquema |
+|---|---|---|
+| Operacional | `patients`, `doctors`, `clinical_records`, `appointments`, `medical_consultations`, `consultation_amendments` | Migraciones de SIGCM |
+| Identidad | `users` | Migraciones de autenticación Laravel, adaptadas al proyecto |
+| Autorización | `roles`, `permissions`, `role_has_permissions`, `model_has_roles`, `model_has_permissions` | Migraciones oficiales de Spatie (`teams=false`) |
+
+**Convenciones:** `PK` = clave primaria; `FK` = clave foránea; `UK` = unicidad; `NULL` = valor opcional. Los tipos PostgreSQL recomendados son orientativos hasta definir las migraciones. Los campos agrupados con coma representan columnas independientes del mismo tipo y nulabilidad. `created_at/updated_at` reflejan convenciones de Laravel, pero los paquetes externos pueden ajustar sus definiciones según su versión instalada.
+
+#### `users` — Identidades y acceso
+
+**Responsable:** Laravel / aplicación.
+
+| Campo | Tipo propuesto | ¿NULL? | Regla / finalidad |
+|---|---|---|---|
+| `id` | `BIGINT` | No | PK |
+| `name` | `VARCHAR(150)` | No | Nombre visible del usuario |
+| `email` | `VARCHAR(255)` | No | UK; correo normalizado |
+| `password` | `VARCHAR(255)` | No | Hash generado por Laravel; nunca texto claro |
+| `is_active` | `BOOLEAN` | No | DEFAULT true |
+| `created_at, updated_at` | `TIMESTAMPTZ` | Sí | Metadatos convencionales de Laravel |
+
+**Restricciones / índices:**
+- Un usuario puede existir sin ser médico.
+- No crear `role_id` en `users`; usar tablas Spatie.
+- Desactivar cuentas en lugar de borrar identidades históricas.
+
+#### `doctors` — Médicos
+
+**Responsable:** SIGCM.
+
+| Campo | Tipo propuesto | ¿NULL? | Regla / finalidad |
+|---|---|---|---|
+| `id` | `BIGINT` | No | PK |
+| `user_id` | `BIGINT` | Sí | FK → `users.id`, UK; cuenta opcional |
+| `first_names, last_names` | `VARCHAR(150)` | No | Nombre legal/profesional |
+| `professional_license` | `VARCHAR(70)` | No | UK; matrícula / registro profesional |
+| `specialty` | `VARCHAR(150)` | Sí | Descriptor inicial, no catálogo M:N |
+| `is_active` | `BOOLEAN` | No | DEFAULT true |
+| `created_at, updated_at` | `TIMESTAMPTZ` | Sí | Metadatos |
+
+**Restricciones / índices:**
+- `user_id` no determina rol ni permiso; la identidad profesional es independiente.
+- Médico inactivo conserva consultas históricas, pero no admite nuevas reservas.
+
+#### `patients` — Pacientes
+
+**Responsable:** SIGCM.
+
+| Campo | Tipo propuesto | ¿NULL? | Regla / finalidad |
+|---|---|---|---|
+| `id` | `BIGINT` | No | PK |
+| `document_type` | `VARCHAR(20)` | Sí | Tipo de identificación |
+| `document_number` | `VARCHAR(60)` | Sí | Número de identificación |
+| `first_names, last_names` | `VARCHAR(150)` | No | Nombre del paciente |
+| `birth_date` | `DATE` | Sí | Fecha de nacimiento, sin edad redundante |
+| `phone` | `VARCHAR(40)` | Sí | Contacto |
+| `email` | `VARCHAR(255)` | Sí | Contacto |
+| `created_at, updated_at` | `TIMESTAMPTZ` | Sí | Metadatos |
+
+**Restricciones / índices:**
+- UK compuesta `(document_type, document_number)`; no exigir documento al crear paciente.
+- CHECK: ambos campos del documento nulos o ambos presentes.
+- No almacenar diagnósticos, tratamientos ni notas clínicas en esta tabla.
+
+#### `clinical_records` — Historias clínicas
+
+**Responsable:** SIGCM.
+
+| Campo | Tipo propuesto | ¿NULL? | Regla / finalidad |
+|---|---|---|---|
+| `id` | `BIGINT` | No | PK |
+| `patient_id` | `BIGINT` | No | FK → `patients.id`; UK para 1:1 |
+| `medical_history` | `TEXT` | Sí | Antecedentes patológicos |
+| `surgical_history` | `TEXT` | Sí | Antecedentes quirúrgicos |
+| `family_history` | `TEXT` | Sí | Antecedentes familiares |
+| `allergies` | `TEXT` | Sí | Alergias |
+| `current_medications` | `TEXT` | Sí | Medicación habitual |
+| `opened_at` | `TIMESTAMPTZ` | No | Fecha de apertura del expediente |
+| `created_at, updated_at` | `TIMESTAMPTZ` | Sí | Metadatos |
+
+**Restricciones / índices:**
+- Crear expediente conjuntamente con el paciente en una sola transacción.
+- El detalle cronológico de visitas reside en `medical_consultations`; no duplicarlo aquí.
+
+#### `appointments` — Citas
+
+**Responsable:** SIGCM.
+
+| Campo | Tipo propuesto | ¿NULL? | Regla / finalidad |
+|---|---|---|---|
+| `id` | `BIGINT` | No | PK |
+| `patient_id` | `BIGINT` | No | FK → `patients.id` |
+| `doctor_id` | `BIGINT` | No | FK → `doctors.id` |
+| `created_by_user_id` | `BIGINT` | Sí | FK → `users.id`, para reservas manuales o externas |
+| `starts_at, ends_at` | `TIMESTAMPTZ` | No | Intervalo `[inicio, fin)` |
+| `status` | `VARCHAR(20)` | No | pending / confirmed / checked_in / completed / cancelled / no_show |
+| `reason` | `TEXT` | Sí | Motivo administrativo |
+| `cancellation_reason` | `TEXT` | Sí | Motivo de cancelación |
+| `created_at, updated_at` | `TIMESTAMPTZ` | Sí | Metadatos |
+
+**Restricciones / índices:**
+- CHECK `ends_at > starts_at` y status en catálogo permitido.
+- UK `(id,patient_id,doctor_id)` necesaria para FK compuesta de consultas.
+- En PostgreSQL, EXCLUDE sobre médico + `tstzrange` para impedir solapamiento de citas no canceladas.
+- Índices `(doctor_id, starts_at)`, `(patient_id, starts_at DESC)`.
+
+#### `medical_consultations` — Consultas médicas
+
+**Responsable:** SIGCM.
+
+| Campo | Tipo propuesto | ¿NULL? | Regla / finalidad |
+|---|---|---|---|
+| `id` | `BIGINT` | No | PK |
+| `patient_id` | `BIGINT` | No | FK → `patients.id` |
+| `doctor_id` | `BIGINT` | No | FK → `doctors.id` |
+| `appointment_id` | `BIGINT` | Sí | FK → `appointments.id`; UK, permite atención sin cita |
+| `occurred_at` | `TIMESTAMPTZ` | No | Momento real de la atención |
+| `reason_for_visit` | `TEXT` | Sí | Obligatorio antes de firmar |
+| `subjective, objective` | `TEXT` | Sí | SOAP: síntomas y hallazgos |
+| `assessment, plan` | `TEXT` | Sí | SOAP: evaluación y plan |
+| `status` | `VARCHAR(15)` | No | draft / signed |
+| `signed_at` | `TIMESTAMPTZ` | Sí | No nulo cuando está firmada |
+| `created_at, updated_at` | `TIMESTAMPTZ` | Sí | Metadatos |
+
+**Restricciones / índices:**
+- UK `appointment_id` (permite múltiples NULL en PostgreSQL).
+- FK compuesta `(appointment_id,patient_id,doctor_id)` → `appointments(id,patient_id,doctor_id)` para coherencia de citas.
+- CHECK `(status='draft' AND signed_at IS NULL) OR (status='signed' AND signed_at IS NOT NULL)`.
+- No sobrescribir consultas firmadas; únicamente anexar correcciones.
+
+#### `consultation_amendments` — Enmiendas clínicas
+
+**Responsable:** SIGCM.
+
+| Campo | Tipo propuesto | ¿NULL? | Regla / finalidad |
+|---|---|---|---|
+| `id` | `BIGINT` | No | PK |
+| `medical_consultation_id` | `BIGINT` | No | FK → `medical_consultations.id` |
+| `author_user_id` | `BIGINT` | No | FK → `users.id` |
+| `reason` | `TEXT` | No | Motivo justificativo |
+| `additional_note` | `TEXT` | No | Contenido de la corrección |
+| `created_at` | `TIMESTAMPTZ` | No | Fecha inmutable de la enmienda |
+
+**Restricciones / índices:**
+- Solo crear enmiendas para consultas firmadas.
+- No `UPDATE` ni `DELETE` ordinario; mantener autor y marca temporal verificables.
+- Índice `(medical_consultation_id, created_at)`.
+
+#### `roles` — Autorización
+
+**Responsable:** Spatie Laravel Permission.
+
+| Campo | Tipo propuesto | ¿NULL? | Regla / finalidad |
+|---|---|---|---|
+| `id` | `BIGINT` | No | PK |
+| `name` | `VARCHAR(255)` | No | Nombre del rol: admin, medico, recepcionista |
+| `guard_name` | `VARCHAR(255)` | No | Guard esperado: web |
+| `created_at, updated_at` | `TIMESTAMPTZ` | Sí | Según migración del paquete |
+
+**Restricciones / índices:**
+- UK `(name, guard_name)` con `teams=false`.
+- La tabla la genera Spatie; **no** crear migración propia duplicada.
+
+#### `permissions` — Autorización
+
+**Responsable:** Spatie Laravel Permission.
+
+| Campo | Tipo propuesto | ¿NULL? | Regla / finalidad |
+|---|---|---|---|
+| `id` | `BIGINT` | No | PK |
+| `name` | `VARCHAR(255)` | No | Capacidad generada por Shield o personalizada |
+| `guard_name` | `VARCHAR(255)` | No | Guard esperado: web |
+| `created_at, updated_at` | `TIMESTAMPTZ` | Sí | Según migración del paquete |
+
+**Restricciones / índices:**
+- UK `(name, guard_name)`.
+- Firmar o enmendar consultas requiere permisos de negocio explícitos y Policies además de permisos Shield.
+
+#### `role_has_permissions` — Autorización
+
+**Responsable:** Spatie Laravel Permission.
+
+| Campo | Tipo propuesto | ¿NULL? | Regla / finalidad |
+|---|---|---|---|
+| `permission_id` | `BIGINT` | No | PK compuesta, FK → `permissions.id` |
+| `role_id` | `BIGINT` | No | PK compuesta, FK → `roles.id` |
+
+**Restricciones / índices:**
+- PK compuesta `(permission_id, role_id)` y sin columna `id` adicional.
+- Implementa N:M entre roles y permisos.
+
+#### `model_has_roles` — Autorización
+
+**Responsable:** Spatie Laravel Permission.
+
+| Campo | Tipo propuesto | ¿NULL? | Regla / finalidad |
+|---|---|---|---|
+| `role_id` | `BIGINT` | No | PK compuesta, FK → `roles.id` |
+| `model_type` | `VARCHAR(255)` | No | PK compuesta, clase autorizable |
+| `model_id` | `BIGINT` | No | PK compuesta, identificador de modelo (usualmente `users.id`) |
+
+**Restricciones / índices:**
+- PK compuesta `(role_id,model_id,model_type)` con `teams=false`.
+- `model_id` + `model_type` es una relación polimórfica, no una FK SQL hacia `users`.
+
+#### `model_has_permissions` — Autorización
+
+**Responsable:** Spatie Laravel Permission.
+
+| Campo | Tipo propuesto | ¿NULL? | Regla / finalidad |
+|---|---|---|---|
+| `permission_id` | `BIGINT` | No | PK compuesta, FK → `permissions.id` |
+| `model_type` | `VARCHAR(255)` | No | PK compuesta, clase autorizable |
+| `model_id` | `BIGINT` | No | PK compuesta, identificador del modelo |
+
+**Restricciones / índices:**
+- PK compuesta `(permission_id,model_id,model_type)` con `teams=false`.
+- Usar concesiones directas solo cuando exista una justificación; preferir roles y Policies.
+
+### 2.6. Integridad referencial y decisiones de normalización
+
+| Relación / dependencia | Clave(s) | Cardinalidad | Acción propuesta al eliminar |
+|---|---|---|---|
+| Paciente → historia | `clinical_records.patient_id` | 1:0..1 (1:1 mediante alta transaccional) | `RESTRICT` |
+| Paciente → citas | `appointments.patient_id` | 1:N | `RESTRICT` |
+| Médico → citas | `appointments.doctor_id` | 1:N | `RESTRICT` |
+| Paciente → consultas | `medical_consultations.patient_id` | 1:N | `RESTRICT` |
+| Médico → consultas | `medical_consultations.doctor_id` | 1:N | `RESTRICT` |
+| Cita → consulta | `medical_consultations.appointment_id` | 0..1:0..1 | `RESTRICT` |
+| Consulta → enmiendas | `consultation_amendments.medical_consultation_id` | 1:N | `RESTRICT` |
+| Usuario → médico | `doctors.user_id` | 0..1:0..1 | `RESTRICT` o desactivación de cuenta |
+| Usuario → cita creada | `appointments.created_by_user_id` | 1:N opcional | `RESTRICT` o desactivación de cuenta |
+| Usuario → enmienda | `consultation_amendments.author_user_id` | 1:N | `RESTRICT` |
+| Roles ↔ permisos | `role_has_permissions` | N:M | Cascade sobre pivote **del paquete** |
+| Roles / permisos ↔ modelo | `model_has_roles`, `model_has_permissions` | N:M polimórfica | Gestión por Spatie; sin FK física a `users` |
+
+**3FN / normalización**:
+
+1. `medical_consultations` no repite antecedentes de `clinical_records`; cada consulta registra hechos de un instante clínico específico.
+2. Edad no se almacena: se calcula desde `patients.birth_date`; ninguna lista de consultas se guarda serializada en el expediente.
+3. Las relaciones N:M de autorización usan tablas pivote estándar, evitando campos multivaluados y roles duplicados.
+4. `doctors.user_id` vincula la identidad profesional con una credencial opcional; `users` no almacena especialidad ni matrícula.
+5. `appointments` y `medical_consultations` tienen ciclos de vida independientes; una consulta espontánea tiene `appointment_id = NULL`.
+
+**Restricciones que requieren implementar más que claves:** una FK no verifica que un médico esté activo, que una cita esté en estado compatible ni que una consulta firmada sea inmutable; esos invariantes exigen casos de uso transaccionales y, para garantías resistentes a escrituras fuera de la aplicación, políticas de escritura/trigger PostgreSQL según la criticidad validada. La exclusión de solapamientos se describe en el capítulo 4.
+
+**Filament Shield:** no hay una tabla `filament_shield`, ni se necesita `user_roles`. Shield administra permisos mediante Spatie. En el entorno real se debe instalar/publicar la migración de la versión de `spatie/laravel-permission` seleccionada, no copiar manualmente estas definiciones de referencia.
+
+**Límite del modelo:** no se incluyen consultorios, especialidades normalizadas, órdenes clínicas, pagos, resultados de laboratorio o multi-sede: requieren aprobar nuevos casos de uso.
+
 ## 3. Diccionario de entidades
 
 ### 3.1. `patients`
