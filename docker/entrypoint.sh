@@ -15,6 +15,20 @@ mkdir -p /var/www/html/storage/framework/sessions \
 
 chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache
 
+# Garantizar que APP_KEY tenga formato válido de 32 bytes (base64:...) para AES-256-CBC
+# Render generateValue genera un base64 de 32 bytes sin el prefijo 'base64:' que requiere Laravel
+case "${APP_KEY}" in
+    base64:*)
+        ;;
+    *)
+        if [ -n "${APP_KEY}" ]; then
+            export APP_KEY="base64:$(php -r 'echo base64_encode(substr(hash("sha256", getenv("APP_KEY"), true), 0, 32));')"
+        else
+            export APP_KEY="base64:$(php -r 'echo base64_encode(random_bytes(32));')"
+        fi
+        ;;
+esac
+
 echo "==> Publicando recursos de Filament y optimizando configuración..."
 php artisan filament:assets --ansi || true
 php artisan storage:link --force --ansi || true
