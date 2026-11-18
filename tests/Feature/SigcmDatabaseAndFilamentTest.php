@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Models\MedicalConsultation;
 use App\Models\User;
 use App\Services\SigcmDatabaseService;
 use Illuminate\Support\Facades\DB;
@@ -17,6 +18,19 @@ class SigcmDatabaseAndFilamentTest extends TestCase
         config(['database.default' => 'pgsql']);
         DB::purge('pgsql');
         DB::purge('pgsql_asistente');
+    }
+
+    public function test_scripts_sql_estan_consolidados_en_carpeta_sql(): void
+    {
+        $schemaScript = base_path('sql/01_base_de_datos_e_inserts.sql');
+        $db2Script = base_path('sql/02_triggers_procedimientos_vistas_dcl.sql');
+
+        $this->assertFileExists($schemaScript);
+        $this->assertFileExists($db2Script);
+        $this->assertFileDoesNotExist(base_path('base_de_datos.sql'));
+
+        $this->assertStringContainsString('CREATE TABLE users', (string) file_get_contents($schemaScript));
+        $this->assertStringContainsString('CREATE PROCEDURE sp_registrar_y_firmar_consulta_segura', (string) file_get_contents($db2Script));
     }
 
     public function test_asistente_puede_leer_las_tres_vistas_publicas(): void
@@ -74,12 +88,15 @@ class SigcmDatabaseAndFilamentTest extends TestCase
 
             $afterConsultationsCount = (int) $connection->table('medical_consultations')->count();
             $afterAuditCount = (int) $connection->table('audit_events')->count();
-            $lastAudit = $connection->table('audit_events')->orderByDesc('id')->first();
+            $lastConsultationAudit = $connection->table('audit_events')
+                ->where('entity_name', 'medical_consultations')
+                ->orderByDesc('id')
+                ->first();
 
             $this->assertSame($beforeConsultationsCount + 1, $afterConsultationsCount);
             $this->assertGreaterThan($beforeAuditCount, $afterAuditCount);
-            $this->assertNotNull($lastAudit);
-            $this->assertSame('SIGN', $lastAudit->operation);
+            $this->assertNotNull($lastConsultationAudit);
+            $this->assertSame('SIGN', $lastConsultationAudit->operation);
         } finally {
             $connection->rollBack();
         }
@@ -150,8 +167,17 @@ class SigcmDatabaseAndFilamentTest extends TestCase
         }
     }
 
-    public function test_panel_filament_y_tres_vistas_iniciales_responden_correctamente(): void
+    public function test_panel_filament_usa_idioma_espanol_y_terminologia_empresarial(): void
     {
+        $this->assertSame('es', app()->getLocale());
+
+        $this->get('/admin/login')
+            ->assertOk()
+            ->assertSee('lang="es"', false)
+            ->assertSee('Entre a su cuenta')
+            ->assertSee('Correo electrónico')
+            ->assertSee('Entrar');
+
         $admin = User::query()->where('email', 'admin@sigcm.local')->first();
 
         $this->assertNotNull($admin);
@@ -159,24 +185,263 @@ class SigcmDatabaseAndFilamentTest extends TestCase
         $this->actingAs($admin)
             ->get('/admin')
             ->assertOk()
-            ->assertSee('Resumen ejecutivo en tiempo real')
-            ->assertSee('Arquitectura implementada en la materia');
-
-        $this->actingAs($admin)
-            ->get('/admin/catalogo-medicos')
-            ->assertOk()
-            ->assertSee('vw_catalogo_medicos_publico')
-            ->assertSee('vw_expedientes_episodios_resumen');
-
-        $this->actingAs($admin)
-            ->get('/admin/agenda-consultas')
-            ->assertOk()
-            ->assertSee('vw_agenda_consultas_detalle');
+            ->assertSee('SIGCM · Gestión Clínica Médica')
+            ->assertSee('Resumen clínico operativo')
+            ->assertDontSee('Laboratorio BD II')
+            ->assertDontSee('Arquitectura implementada en la materia');
 
         $this->actingAs($admin)
             ->get('/admin/bitacora-auditoria')
             ->assertOk()
-            ->assertSee('Bloqueo de seguridad verificado')
-            ->assertSee('42501');
+            ->assertSee('Control de acceso restringido verificado')
+            ->assertSee('42501')
+            ->assertDontSee('Laboratorio BD II');
+    }
+
+    public function test_exclusion_constraint_rechaza_citas_activas_solapadas_para_un_mismo_medico(): void
+    {
+        $connection = DB::connection('pgsql');
+        $connection->beginTransaction();
+
+        try {
+            $connection->table('appointments')->insert([
+                'patient_id' => 1,
+                'doctor_id' => 1,
+                'created_by_user_id' => 1,
+                'starts_at' => '2026-12-10 09:00:00-04',
+                'ends_at' => '2026-12-10 09:30:00-04',
+                'status' => 'confirmed',
+                'reason' => 'Cita base de prueba GiST',
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+
+            $caught = false;
+
+            try {
+                $connection->transaction(function () use ($connection): void {
+                    $connection->table('appointments')->insert([
+                        'patient_id' => 2,
+                        'doctor_id' => 1,
+                        'created_by_user_id' => 1,
+                        'starts_at' => '2026-12-10 09:15:00-04',
+                        'ends_at' => '2026-12-10 09:45:00-04',
+                        'status' => 'pending',
+                        'reason' => 'Solapamiento prohibido',
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ]);
+                });
+            } catch (Throwable) {
+                $caught = true;
+            }
+
+            $this->assertTrue($caught);
+
+            $cancelledId = (int) $connection->table('appointments')->insertGetId([
+                'patient_id' => 2,
+                'doctor_id' => 1,
+                'created_by_user_id' => 1,
+                'starts_at' => '2026-12-10 09:15:00-04',
+                'ends_at' => '2026-12-10 09:45:00-04',
+                'status' => 'cancelled',
+                'reason' => 'Cita cancelada permitida en el mismo bloque',
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+
+            $this->assertGreaterThan(0, $cancelledId);
+        } finally {
+            $connection->rollBack();
+        }
+    }
+
+    public function test_enmiendas_y_bitacora_son_inmutables_append_only(): void
+    {
+        $connection = DB::connection('pgsql');
+        $connection->beginTransaction();
+
+        try {
+            $amendment = $connection->table('consultation_amendments')->first();
+            $auditEvent = $connection->table('audit_events')->first();
+
+            $this->assertNotNull($amendment);
+            $this->assertNotNull($auditEvent);
+
+            $caughtAmendmentUpdate = false;
+
+            try {
+                $connection->transaction(function () use ($connection, $amendment): void {
+                    $connection->table('consultation_amendments')
+                        ->where('id', $amendment->id)
+                        ->update(['reason' => 'Intento de alteración']);
+                });
+            } catch (Throwable $exception) {
+                $caughtAmendmentUpdate = str_contains($exception->getMessage(), 'append-only');
+            }
+
+            $caughtAuditDelete = false;
+
+            try {
+                $connection->transaction(function () use ($connection, $auditEvent): void {
+                    $connection->table('audit_events')
+                        ->where('id', $auditEvent->id)
+                        ->delete();
+                });
+            } catch (Throwable $exception) {
+                $caughtAuditDelete = str_contains($exception->getMessage(), 'append-only');
+            }
+
+            $this->assertTrue($caughtAmendmentUpdate);
+            $this->assertTrue($caughtAuditDelete);
+        } finally {
+            $connection->rollBack();
+        }
+    }
+
+    public function test_consulta_firmada_protege_diagnosticos_y_sp_firmar_consulta_existente_funciona(): void
+    {
+        $connection = DB::connection('pgsql');
+        $service = app(SigcmDatabaseService::class);
+        $connection->beginTransaction();
+
+        try {
+            $signedConsultation = $connection->table('medical_consultations')
+                ->where('status', 'signed')
+                ->first();
+
+            $this->assertNotNull($signedConsultation);
+
+            $caughtSignedDiagnosis = false;
+
+            try {
+                $connection->transaction(function () use ($connection, $signedConsultation): void {
+                    $connection->table('consultation_diagnoses')->insert([
+                        'consultation_id' => $signedConsultation->id,
+                        'code_system' => 'CIE-10',
+                        'code' => 'I10',
+                        'diagnosis_text' => 'Intento fuera de borrador',
+                        'certainty' => 'confirmed',
+                        'is_primary' => false,
+                        'created_at' => now(),
+                    ]);
+                });
+            } catch (Throwable $exception) {
+                $caughtSignedDiagnosis = str_contains($exception->getMessage(), 'ya está firmada');
+            }
+
+            $this->assertTrue($caughtSignedDiagnosis);
+
+            $draftConsultationId = (int) $connection->table('medical_consultations')->insertGetId([
+                'patient_id' => 1,
+                'doctor_id' => 1,
+                'occurred_at' => now()->subMinutes(10),
+                'chief_complaint' => 'Control de presión arterial para firma',
+                'subjective' => 'Sin cefalea actual',
+                'objective' => 'PA 125/80 mmHg',
+                'assessment' => 'Hipertensión controlada',
+                'plan' => 'Mantener esquema y control mensual',
+                'status' => 'draft',
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+
+            $connection->table('consultation_diagnoses')->insert([
+                'consultation_id' => $draftConsultationId,
+                'code_system' => 'CIE-10',
+                'code' => 'I10',
+                'diagnosis_text' => 'Hipertensión esencial controlada',
+                'certainty' => 'confirmed',
+                'is_primary' => true,
+                'created_at' => now(),
+            ]);
+
+            $draftModel = MedicalConsultation::query()->findOrFail($draftConsultationId);
+            $service->firmarConsultaExistente($draftModel, 1, 'Episodio de control desde borrador');
+
+            $signedRow = $connection->table('medical_consultations')->where('id', $draftConsultationId)->first();
+            $this->assertSame('signed', $signedRow?->status);
+            $this->assertNotNull($signedRow?->signed_at);
+        } finally {
+            $connection->rollBack();
+        }
+    }
+
+    public function test_consistencia_de_paciente_entre_episodio_y_consultas(): void
+    {
+        $connection = DB::connection('pgsql');
+        $connection->beginTransaction();
+
+        try {
+            $episodePatientOne = $connection->table('care_episodes')
+                ->join('clinical_records', 'clinical_records.id', '=', 'care_episodes.clinical_record_id')
+                ->where('clinical_records.patient_id', 1)
+                ->select('care_episodes.id as episode_id')
+                ->first();
+
+            $consultationPatientTwo = $connection->table('medical_consultations')
+                ->where('patient_id', 2)
+                ->first();
+
+            $this->assertNotNull($episodePatientOne);
+            $this->assertNotNull($consultationPatientTwo);
+
+            $caughtMismatch = false;
+
+            try {
+                $connection->transaction(function () use ($connection, $episodePatientOne, $consultationPatientTwo): void {
+                    $connection->table('episode_consultations')->insert([
+                        'episode_id' => $episodePatientOne->episode_id,
+                        'consultation_id' => $consultationPatientTwo->id,
+                        'relation_type' => 'related',
+                        'created_at' => now(),
+                    ]);
+                });
+            } catch (Throwable $exception) {
+                $caughtMismatch = str_contains($exception->getMessage(), 'no corresponde al paciente del episodio');
+            }
+
+            $this->assertTrue($caughtMismatch);
+        } finally {
+            $connection->rollBack();
+        }
+    }
+
+    public function test_sp_sustituir_receta_segura_reemplaza_receta_emitida_y_registra_auditoria(): void
+    {
+        $connection = DB::connection('pgsql');
+        $service = app(SigcmDatabaseService::class);
+        $connection->beginTransaction();
+
+        try {
+            $issuedPrescription = $connection->table('prescriptions')
+                ->where('status', 'issued')
+                ->first();
+
+            $this->assertNotNull($issuedPrescription);
+
+            $newPrescriptionId = $service->sustituirRecetaSegura(
+                oldPrescriptionId: (int) $issuedPrescription->id,
+                actorUserId: 1,
+                notes: 'Ajuste terapéutico por tolerancia'
+            );
+
+            $oldAfter = $connection->table('prescriptions')->where('id', $issuedPrescription->id)->first();
+            $newAfter = $connection->table('prescriptions')->where('id', $newPrescriptionId)->first();
+
+            $this->assertSame('replaced', $oldAfter?->status);
+            $this->assertSame('draft', $newAfter?->status);
+            $this->assertSame((int) $issuedPrescription->id, (int) $newAfter?->supersedes_prescription_id);
+
+            $auditLogged = $connection->table('audit_events')
+                ->where('entity_name', 'prescriptions')
+                ->where('entity_id', $newPrescriptionId)
+                ->where('operation', 'INSERT')
+                ->exists();
+
+            $this->assertTrue($auditLogged);
+        } finally {
+            $connection->rollBack();
+        }
     }
 }

@@ -2,6 +2,7 @@
 
 namespace App\Filament\Pages;
 
+use App\Models\AuditEvent;
 use App\Services\SigcmDatabaseService;
 use BackedEnum;
 use Filament\Actions\Action;
@@ -9,21 +10,41 @@ use Filament\Forms\Components\Select;
 use Filament\Notifications\Notification;
 use Filament\Pages\Page;
 use Filament\Support\Icons\Heroicon;
+use Illuminate\Support\Facades\Auth;
 use Throwable;
+use UnitEnum;
 
 class BitacoraAuditoriaPage extends Page
 {
     protected static ?string $slug = 'bitacora-auditoria';
 
+    protected static bool $shouldRegisterNavigation = false;
+
     protected static string|BackedEnum|null $navigationIcon = Heroicon::OutlinedShieldCheck;
 
-    protected static ?string $navigationLabel = '3. Bitácora y Seguridad DCL';
-
-    protected static ?string $title = 'Bitácora de Auditoría y Verificación DCL';
-
-    protected static ?int $navigationSort = 3;
+    protected static ?int $navigationSort = 2;
 
     protected string $view = 'filament.pages.bitacora-auditoria-page';
+
+    public static function getNavigationGroup(): string|UnitEnum|null
+    {
+        return __('sigcm.nav.security_admin');
+    }
+
+    public static function getNavigationLabel(): string
+    {
+        return __('sigcm.audit.page_nav');
+    }
+
+    public function getTitle(): string
+    {
+        return __('sigcm.audit.page_title');
+    }
+
+    public static function canAccess(): bool
+    {
+        return Auth::user()?->can('viewAny', AuditEvent::class) ?? false;
+    }
 
     /**
      * @return array<Action>
@@ -32,14 +53,14 @@ class BitacoraAuditoriaPage extends Page
     {
         return [
             Action::make('probarInmutabilidad')
-                ->label('Probar Trigger Inmutabilidad')
+                ->label(__('sigcm.audit.check_immutability'))
                 ->icon(Heroicon::OutlinedShieldCheck)
                 ->color('warning')
-                ->modalHeading('Prueba de Trigger BEFORE UPDATE (trg_validar_inmutabilidad_consulta)')
-                ->modalDescription('Intenta modificar el motivo de una consulta médica ya firmada para verificar que PostgreSQL 17 rechaza la alteración.')
+                ->modalHeading(__('sigcm.audit.modal_heading'))
+                ->modalDescription(__('sigcm.audit.modal_description'))
                 ->schema([
                     Select::make('consultation_id')
-                        ->label('Consulta firmada a intentar alterar')
+                        ->label(__('sigcm.audit.select_signed_consultation'))
                         ->options(fn (): array => app(SigcmDatabaseService::class)->getSignedConsultationOptions())
                         ->searchable()
                         ->required(),
@@ -51,13 +72,13 @@ class BitacoraAuditoriaPage extends Page
                         $service->probarInmutabilidadConsultaFirmada((int) $data['consultation_id']);
 
                         Notification::make()
-                            ->title('Advertencia: La consulta fue modificada')
-                            ->body('El trigger de inmutabilidad no detuvo la operación.')
+                            ->title(__('sigcm.audit.immutability_failed_title'))
+                            ->body(__('sigcm.audit.immutability_failed_body'))
                             ->danger()
                             ->send();
                     } catch (Throwable $exception) {
                         Notification::make()
-                            ->title('Inmutabilidad verificada por Trigger PL/pgSQL')
+                            ->title(__('sigcm.audit.immutability_ok_title'))
                             ->body($service->formatDatabaseException($exception))
                             ->success()
                             ->persistent()

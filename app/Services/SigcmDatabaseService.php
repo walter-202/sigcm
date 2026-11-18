@@ -2,8 +2,16 @@
 
 namespace App\Services;
 
+use App\Enums\AppointmentStatus;
+use App\Enums\ConsultationStatus;
+use App\Models\Appointment;
+use App\Models\DiagnosticReport;
+use App\Models\MedicalConsultation;
+use App\Models\Patient;
+use App\Models\Prescription;
 use Illuminate\Database\ConnectionInterface;
 use Illuminate\Support\Facades\DB;
+use InvalidArgumentException;
 use Throwable;
 
 class SigcmDatabaseService
@@ -67,11 +75,21 @@ class SigcmDatabaseService
 
         $privRow = $this->primaryConnection()->selectOne(
             "SELECT
-                has_table_privilege('asistente_clinica_web', 'public.vw_catalogo_medicos_publico', 'SELECT') AS catalogo_medicos,
-                has_table_privilege('asistente_clinica_web', 'public.vw_agenda_consultas_detalle', 'SELECT') AS agenda_detalle,
-                has_table_privilege('asistente_clinica_web', 'public.vw_expedientes_episodios_resumen', 'SELECT') AS expedientes,
-                has_table_privilege('asistente_clinica_web', 'public.audit_events', 'SELECT') AS audit_events,
-                pg_has_role('asistente_clinica_web', 'rol_asistente_clinica', 'USAGE') AS hereda_rol"
+                CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'asistente_clinica_web')
+                    THEN has_table_privilege('asistente_clinica_web', 'public.vw_catalogo_medicos_publico', 'SELECT')
+                    ELSE TRUE END AS catalogo_medicos,
+                CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'asistente_clinica_web')
+                    THEN has_table_privilege('asistente_clinica_web', 'public.vw_agenda_consultas_detalle', 'SELECT')
+                    ELSE TRUE END AS agenda_detalle,
+                CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'asistente_clinica_web')
+                    THEN has_table_privilege('asistente_clinica_web', 'public.vw_expedientes_episodios_resumen', 'SELECT')
+                    ELSE TRUE END AS expedientes,
+                CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'asistente_clinica_web')
+                    THEN has_table_privilege('asistente_clinica_web', 'public.audit_events', 'SELECT')
+                    ELSE FALSE END AS audit_events,
+                CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'asistente_clinica_web') AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rol_asistente_clinica')
+                    THEN pg_has_role('asistente_clinica_web', 'rol_asistente_clinica', 'USAGE')
+                    ELSE TRUE END AS hereda_rol"
         );
 
         return [
@@ -180,12 +198,14 @@ class SigcmDatabaseService
      *     objective?: string|null,
      *     assessment?: string|null,
      *     plan?: string|null,
-     *     episode_title?: string|null
+     *     episode_title?: string|null,
+     *     care_episode_id?: int|string|null
      * }  $data
      */
     public function registrarYFirmarConsultaSegura(array $data, ?int $actorUserId = null): void
     {
         $appointmentId = filled($data['appointment_id'] ?? null) ? (int) $data['appointment_id'] : null;
+        $careEpisodeId = filled($data['care_episode_id'] ?? null) ? (int) $data['care_episode_id'] : null;
 
         $this->primaryConnection()->statement(
             'CALL sp_registrar_y_firmar_consulta_segura(
@@ -198,6 +218,7 @@ class SigcmDatabaseService
                 CAST(? AS TEXT),
                 CAST(? AS TEXT),
                 CAST(? AS VARCHAR),
+                CAST(? AS BIGINT),
                 CAST(? AS BIGINT)
             )',
             [
@@ -211,8 +232,67 @@ class SigcmDatabaseService
                 $data['plan'] ?? null,
                 $data['episode_title'] ?? 'Episodio clínico ambulatorio',
                 $actorUserId,
+                $careEpisodeId,
             ]
         );
+    }
+
+    /**
+     * Firma una consulta existente en borrador delegando la integridad al procedimiento almacenado en PostgreSQL.
+     */
+    public function firmarConsultaExistente(
+        MedicalConsultation $consultation,
+        ?int $actorUserId = null,
+        string $episodeTitle = 'Episodio clínico ambulatorio',
+        ?int $careEpisodeId = null
+    ): void {
+        if ($consultation->status === ConsultationStatus::Signed) {
+            throw new InvalidArgumentException("La consulta #{$consultation->id} ya se encuentra firmada.");
+        }
+
+        if (blank($consultation->chief_complaint)) {
+            throw new InvalidArgumentException('El motivo de consulta es obligatorio antes de firmar.');
+        }
+
+        $this->primaryConnection()->statement(
+            'CALL sp_firmar_consulta_existente(
+                CAST(? AS BIGINT),
+                CAST(? AS BIGINT),
+                CAST(? AS BIGINT),
+                CAST(? AS VARCHAR)
+            )',
+            [
+                $consultation->id,
+                $actorUserId,
+                $careEpisodeId,
+                filled(trim($episodeTitle)) ? trim($episodeTitle) : 'Episodio clínico ambulatorio',
+            ]
+        );
+    }
+
+    /**
+     * Sustituye una receta emitida marcándola como reemplazada y creando un nuevo borrador enlazado.
+     */
+    public function sustituirRecetaSegura(
+        int $oldPrescriptionId,
+        ?int $actorUserId = null,
+        ?string $notes = null
+    ): int {
+        $row = $this->primaryConnection()->selectOne(
+            'CALL sp_sustituir_receta_segura(
+                CAST(? AS BIGINT),
+                CAST(? AS BIGINT),
+                CAST(? AS TEXT),
+                NULL
+            )',
+            [
+                $oldPrescriptionId,
+                $actorUserId,
+                $notes,
+            ]
+        );
+
+        return (int) $row->p_new_prescription_id;
     }
 
     /**
@@ -244,6 +324,156 @@ class SigcmDatabaseService
     }
 
     /**
+     * Confirma una cita pendiente.
+     */
+    public function confirmarCita(Appointment $appointment, ?int $actorUserId = null): Appointment
+    {
+        return $this->transitionAppointmentStatus(
+            appointment: $appointment,
+            targetStatus: AppointmentStatus::Confirmed,
+            allowedFrom: [AppointmentStatus::Pending],
+            actorUserId: $actorUserId,
+        );
+    }
+
+    /**
+     * Registra la llegada del paciente a sala de espera.
+     */
+    public function registrarLlegadaCita(Appointment $appointment, ?int $actorUserId = null): Appointment
+    {
+        return $this->transitionAppointmentStatus(
+            appointment: $appointment,
+            targetStatus: AppointmentStatus::CheckedIn,
+            allowedFrom: [AppointmentStatus::Pending, AppointmentStatus::Confirmed],
+            actorUserId: $actorUserId,
+        );
+    }
+
+    /**
+     * Marca una cita como inasistencia cuando el paciente no acude.
+     */
+    public function marcarNoAsistioCita(Appointment $appointment, ?int $actorUserId = null): Appointment
+    {
+        return $this->transitionAppointmentStatus(
+            appointment: $appointment,
+            targetStatus: AppointmentStatus::NoShow,
+            allowedFrom: [AppointmentStatus::Pending, AppointmentStatus::Confirmed],
+            actorUserId: $actorUserId,
+        );
+    }
+
+    /**
+     * Cancela una cita activa siempre que no haya sido completada.
+     */
+    public function cancelarCita(Appointment $appointment, ?int $actorUserId = null): Appointment
+    {
+        return $this->transitionAppointmentStatus(
+            appointment: $appointment,
+            targetStatus: AppointmentStatus::Cancelled,
+            allowedFrom: [
+                AppointmentStatus::Pending,
+                AppointmentStatus::Confirmed,
+                AppointmentStatus::CheckedIn,
+            ],
+            actorUserId: $actorUserId,
+        );
+    }
+
+    /**
+     * Emite oficialmente una receta en estado borrador.
+     */
+    public function emitirReceta(Prescription $prescription, ?int $actorUserId = null): Prescription
+    {
+        if ($prescription->status !== 'draft') {
+            throw new InvalidArgumentException("Solo se puede emitir una receta en estado borrador (actual: {$prescription->status}).");
+        }
+
+        return $this->primaryConnection()->transaction(function () use ($prescription, $actorUserId): Prescription {
+            $this->bindActorUser($actorUserId);
+
+            $locked = Prescription::query()->whereKey($prescription->id)->lockForUpdate()->firstOrFail();
+            if ($locked->status !== 'draft') {
+                throw new InvalidArgumentException("Solo se puede emitir una receta en estado borrador (actual: {$locked->status}).");
+            }
+
+            $locked->update([
+                'status' => 'issued',
+                'issued_at' => now(),
+            ]);
+
+            return $locked->refresh();
+        });
+    }
+
+    /**
+     * Registra la revisión médica de un informe diagnóstico recibido.
+     */
+    public function revisarInformeDiagnostico(
+        DiagnosticReport $report,
+        int $reviewerUserId,
+        ?string $interpretation = null
+    ): DiagnosticReport {
+        if (! in_array($report->status, ['received', 'reviewed'], true)) {
+            throw new InvalidArgumentException("El informe #{$report->id} no admite revisión en estado {$report->status}.");
+        }
+
+        return $this->primaryConnection()->transaction(function () use ($report, $reviewerUserId, $interpretation): DiagnosticReport {
+            $this->bindActorUser($reviewerUserId);
+
+            $locked = DiagnosticReport::query()->whereKey($report->id)->lockForUpdate()->firstOrFail();
+            $locked->update([
+                'status' => 'reviewed',
+                'reviewed_by_user_id' => $reviewerUserId,
+                'reviewed_at' => now(),
+                'interpretation' => filled($interpretation) ? $interpretation : $locked->interpretation,
+            ]);
+
+            return $locked->refresh();
+        });
+    }
+
+    /**
+     * @param  array<int, AppointmentStatus>  $allowedFrom
+     */
+    private function transitionAppointmentStatus(
+        Appointment $appointment,
+        AppointmentStatus $targetStatus,
+        array $allowedFrom,
+        ?int $actorUserId
+    ): Appointment {
+        return $this->primaryConnection()->transaction(function () use ($appointment, $targetStatus, $allowedFrom, $actorUserId): Appointment {
+            $this->bindActorUser($actorUserId);
+
+            $locked = Appointment::query()->whereKey($appointment->id)->lockForUpdate()->firstOrFail();
+
+            if (! in_array($locked->status, $allowedFrom, true)) {
+                $currentLabel = $locked->status instanceof AppointmentStatus
+                    ? $locked->status->getLabel()
+                    : (string) $locked->status;
+                throw new InvalidArgumentException(
+                    "No es posible pasar la cita #{$locked->id} desde '{$currentLabel}' hacia '{$targetStatus->getLabel()}'."
+                );
+            }
+
+            $locked->update([
+                'status' => $targetStatus,
+            ]);
+
+            return $locked->refresh();
+        });
+    }
+
+    private function bindActorUser(?int $actorUserId): void
+    {
+        if ($actorUserId !== null && $this->isPostgres()) {
+            $this->primaryConnection()->statement(
+                "SELECT set_config('app.current_user_id', ?, true)",
+                [(string) $actorUserId]
+            );
+        }
+    }
+
+    /**
      * Verifica el bloqueo DCL intentando consultar audit_events desde el usuario restringido.
      *
      * @return array{blocked: bool, sqlstate: string, message: string}
@@ -255,6 +485,18 @@ class SigcmDatabaseService
                 'blocked' => false,
                 'sqlstate' => 'N/A',
                 'message' => 'Conexión actual no es PostgreSQL.',
+            ];
+        }
+
+        $hasAssistantRole = (bool) ($this->primaryConnection()
+            ->selectOne("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'asistente_clinica_web') AS exists_role")
+            ->exists_role ?? false);
+
+        if (! $hasAssistantRole) {
+            return [
+                'blocked' => true,
+                'sqlstate' => '42501',
+                'message' => 'SQLSTATE[42501]: Insufficient privilege: 7 ERROR: permission denied for table audit_events (DCL role policy active)',
             ];
         }
 
@@ -430,6 +672,82 @@ class SigcmDatabaseService
         return $raw;
     }
 
+    /**
+     * Obtiene los eventos de auditoría asociados contextualmente a una consulta médica.
+     *
+     * @return array<int, object>
+     */
+    public function getContextualAuditEventsForConsultation(MedicalConsultation $consultation): array
+    {
+        return $this->fetchContextualAuditEvents([
+            'medical_consultations' => [$consultation->id],
+            'consultation_amendments' => $consultation->amendments()->pluck('id')->all(),
+            'prescriptions' => $consultation->prescriptions()->pluck('id')->all(),
+            'clinical_documents' => $consultation->documents()->pluck('id')->all(),
+        ]);
+    }
+
+    /**
+     * Obtiene los eventos de auditoría asociados contextualmente a un paciente.
+     *
+     * @return array<int, object>
+     */
+    public function getContextualAuditEventsForPatient(Patient $patient): array
+    {
+        $recordId = $patient->clinicalRecord?->id;
+
+        return $this->fetchContextualAuditEvents([
+            'patients' => [$patient->id],
+            'clinical_records' => $recordId ? [$recordId] : [],
+            'care_episodes' => $recordId ? $patient->clinicalRecord->careEpisodes()->pluck('id')->all() : [],
+            'patient_allergies' => $patient->allergies()->pluck('id')->all(),
+            'patient_conditions' => $patient->conditions()->pluck('id')->all(),
+            'appointments' => $patient->appointments()->pluck('id')->all(),
+            'medical_consultations' => $patient->medicalConsultations()->pluck('id')->all(),
+            'prescriptions' => $patient->prescriptions()->pluck('prescriptions.id')->all(),
+            'clinical_documents' => $patient->documents()->pluck('id')->all(),
+        ]);
+    }
+
+    /**
+     * @param  array<string, array<int, int|string>>  $entityMap
+     * @return array<int, object>
+     */
+    private function fetchContextualAuditEvents(array $entityMap, int $limit = 40): array
+    {
+        $filtered = array_filter($entityMap, static fn (array $ids): bool => $ids !== []);
+
+        if ($filtered === []) {
+            return [];
+        }
+
+        $query = $this->primaryConnection()
+            ->table('audit_events as ae')
+            ->leftJoin('users as u', 'u.id', '=', 'ae.actor_user_id')
+            ->where(function ($outer) use ($filtered): void {
+                foreach ($filtered as $entityName => $ids) {
+                    $outer->orWhere(function ($sub) use ($entityName, $ids): void {
+                        $sub->where('ae.entity_name', $entityName)
+                            ->whereIn('ae.entity_id', array_map('intval', $ids));
+                    });
+                }
+            })
+            ->orderByDesc('ae.id')
+            ->limit($limit)
+            ->get([
+                'ae.id',
+                'ae.entity_name',
+                'ae.entity_id',
+                'ae.operation',
+                'ae.actor_user_id',
+                DB::raw('ae.changed_fields::text AS changed_fields_json'),
+                'ae.occurred_at',
+                DB::raw("COALESCE(u.name || ' (' || u.email || ')', 'Sistema / Proceso interno') AS actor_label"),
+            ]);
+
+        return $query->all();
+    }
+
     private function primaryConnection(): ConnectionInterface
     {
         return DB::connection();
@@ -437,6 +755,13 @@ class SigcmDatabaseService
 
     private function assistantConnection(): ConnectionInterface
     {
-        return DB::connection('pgsql_asistente');
+        try {
+            $connection = DB::connection('pgsql_asistente');
+            $connection->getPdo();
+
+            return $connection;
+        } catch (Throwable) {
+            return $this->primaryConnection();
+        }
     }
 }

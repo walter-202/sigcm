@@ -19,9 +19,15 @@ return new class extends Migration
             return;
         }
 
-        $sqlPath = base_path('base_de_datos.sql');
-        if (is_file($sqlPath)) {
-            DB::unprepared((string) file_get_contents($sqlPath));
+        $scripts = [
+            base_path('sql/01_base_de_datos_e_inserts.sql'),
+            base_path('sql/02_triggers_procedimientos_vistas_dcl.sql'),
+        ];
+
+        foreach ($scripts as $sqlPath) {
+            if (is_file($sqlPath)) {
+                DB::unprepared((string) file_get_contents($sqlPath));
+            }
         }
     }
 

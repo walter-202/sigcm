@@ -13,9 +13,15 @@ class SigcmStatsOverviewWidget extends StatsOverviewWidget
 
     protected static bool $isLazy = false;
 
-    protected ?string $heading = 'Resumen ejecutivo en tiempo real';
+    public function getHeading(): ?string
+    {
+        return __('sigcm.dashboard.heading');
+    }
 
-    protected ?string $description = 'Métricas consultadas mediante vistas restringidas (asistente_clinica_web) y cursor PL/pgSQL en PostgreSQL 17.';
+    public function getDescription(): ?string
+    {
+        return __('sigcm.dashboard.description');
+    }
 
     /**
      * @return array<Stat>
@@ -25,23 +31,31 @@ class SigcmStatsOverviewWidget extends StatsOverviewWidget
         $summary = app(SigcmDatabaseService::class)->getDashboardSummary();
 
         return [
-            Stat::make('Catálogo de Médicos', $summary['medicos_count'])
-                ->description('SELECT COUNT(*) FROM vw_catalogo_medicos_publico')
+            Stat::make(__('sigcm.dashboard.stats.active_doctors'), $summary['medicos_count'])
+                ->description(__('sigcm.dashboard.stats.active_doctors_desc'))
                 ->descriptionIcon(Heroicon::OutlinedUserGroup)
                 ->color('primary'),
 
-            Stat::make('Citas Activas / Horas (Cursor)', "{$summary['cursor']['citas_activas']} citas · {$summary['cursor']['horas_agenda']} h")
-                ->description('CALL sp_valorizar_actividad_clinica()')
+            Stat::make(
+                __('sigcm.dashboard.stats.active_schedule'),
+                __('sigcm.dashboard.stats.active_schedule_value', [
+                    'citas' => $summary['cursor']['citas_activas'],
+                    'horas' => $summary['cursor']['horas_agenda'],
+                ])
+            )
+                ->description(__('sigcm.dashboard.stats.active_schedule_desc'))
                 ->descriptionIcon(Heroicon::OutlinedCalendarDays)
                 ->color('warning'),
 
-            Stat::make('Consultas Firmadas (Inmutables)', $summary['cursor']['consultas_firmadas'])
-                ->description("Expedientes abiertos: {$summary['expedientes_count']}")
+            Stat::make(__('sigcm.dashboard.stats.signed_consultations'), $summary['cursor']['consultas_firmadas'])
+                ->description(__('sigcm.dashboard.stats.signed_consultations_desc', [
+                    'expedientes' => $summary['expedientes_count'],
+                ]))
                 ->descriptionIcon(Heroicon::OutlinedClipboardDocumentList)
                 ->color('success'),
 
-            Stat::make('Eventos en Bitácora (audit_events)', $summary['audit_events_count'])
-                ->description('Registro automático por triggers PL/pgSQL')
+            Stat::make(__('sigcm.dashboard.stats.audit_events'), $summary['audit_events_count'])
+                ->description(__('sigcm.dashboard.stats.audit_events_desc'))
                 ->descriptionIcon(Heroicon::OutlinedShieldCheck)
                 ->color('info'),
         ];

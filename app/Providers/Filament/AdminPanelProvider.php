@@ -2,8 +2,10 @@
 
 namespace App\Providers\Filament;
 
-use App\Filament\Widgets\ArquitecturaBdWidget;
+use App\Filament\Widgets\AppointmentsByStatusChartWidget;
+use App\Filament\Widgets\ClinicalActivityByDoctorChartWidget;
 use App\Filament\Widgets\SigcmStatsOverviewWidget;
+use App\Http\Middleware\SetPostgresAuditActor;
 use BezhanSalleh\FilamentShield\FilamentShieldPlugin;
 use Filament\Http\Middleware\Authenticate;
 use Filament\Http\Middleware\AuthenticateSession;
@@ -14,12 +16,15 @@ use Filament\Panel;
 use Filament\PanelProvider;
 use Filament\Support\Colors\Color;
 use Filament\Widgets\AccountWidget;
+use Guava\Calendar\CalendarPlugin;
 use Illuminate\Cookie\Middleware\AddQueuedCookiesToResponse;
 use Illuminate\Cookie\Middleware\EncryptCookies;
 use Illuminate\Foundation\Http\Middleware\PreventRequestForgery;
 use Illuminate\Routing\Middleware\SubstituteBindings;
 use Illuminate\Session\Middleware\StartSession;
 use Illuminate\View\Middleware\ShareErrorsFromSession;
+use Leandrocfe\FilamentApexCharts\FilamentApexChartsPlugin;
+use pxlrbt\FilamentSpotlight\SpotlightPlugin;
 
 class AdminPanelProvider extends PanelProvider
 {
@@ -29,10 +34,14 @@ class AdminPanelProvider extends PanelProvider
             ->default()
             ->id('admin')
             ->path('admin')
-            ->brandName('SIGCM · BD II (PostgreSQL 17)')
+            ->brandName(fn (): string => __('sigcm.brand_name'))
             ->login()
             ->colors([
                 'primary' => Color::Teal,
+            ])
+            ->navigationGroups([
+                __('sigcm.nav.clinical_management'),
+                __('sigcm.nav.security_admin'),
             ])
             ->discoverResources(in: app_path('Filament/Resources'), for: 'App\Filament\Resources')
             ->discoverPages(in: app_path('Filament/Pages'), for: 'App\Filament\Pages')
@@ -43,13 +52,15 @@ class AdminPanelProvider extends PanelProvider
             ->widgets([
                 AccountWidget::class,
                 SigcmStatsOverviewWidget::class,
-                ArquitecturaBdWidget::class,
+                AppointmentsByStatusChartWidget::class,
+                ClinicalActivityByDoctorChartWidget::class,
             ])
             ->middleware([
                 EncryptCookies::class,
                 AddQueuedCookiesToResponse::class,
                 StartSession::class,
                 AuthenticateSession::class,
+                SetPostgresAuditActor::class,
                 ShareErrorsFromSession::class,
                 PreventRequestForgery::class,
                 SubstituteBindings::class,
@@ -58,6 +69,9 @@ class AdminPanelProvider extends PanelProvider
             ])
             ->plugins([
                 FilamentShieldPlugin::make(),
+                CalendarPlugin::make(),
+                FilamentApexChartsPlugin::make(),
+                SpotlightPlugin::make(),
             ])
             ->authMiddleware([
                 Authenticate::class,
